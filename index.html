@@ -167,16 +167,6 @@ function setStatus(msg, isError) {
   statusEl.classList.toggle('error', !!isError);
 }
 
-async function fetchRandomTitle() {
-  const url = `${API}?action=query&generator=random&grnnamespace=0&grnlimit=1&format=json&origin=*`;
-  const res = await fetch(url);
-  const data = await res.json();
-  const pages = data.query && data.query.pages;
-  if (!pages) return null;
-  const page = Object.values(pages)[0];
-  return page ? page.title : null;
-}
-
 async function fetchWikitext(title) {
   const url = `${API}?action=query&titles=${encodeURIComponent(title)}&prop=revisions&rvprop=content&rvslots=main&format=json&origin=*`;
   const res = await fetch(url);
@@ -207,48 +197,57 @@ function stripWikitext(s) {
 
 const INFLECTED_FORM_PATTERN = /^(prima|seconda|terza)\s+persona|participio\s+(passato|presente)|gerundio|plurale\s+(di|femminile)|femminile\s+(di|plurale|singolare)|maschile\s+(di|plurale|singolare)|singolare\s+(di|maschile|femminile)|forma\s+flessa|voce\s+(verbale\s+)?del\s+verbo|imperativo\s+(di|singolare|plurale)|congiuntivo\s+(di|presente|imperfetto)|condizionale\s+(di|presente)|indicativo\s+(di|presente|imperfetto|futuro)|comparativo\s+di|superlativo\s+di/i;
 
+async function fetchRandomTitles(n) {
+  const url = `${API}?action=query&generator=random&grnnamespace=0&grnlimit=${n}&format=json&origin=*`;
+  const res = await fetch(url);
+  const data = await res.json();
+  const pages = data.query && data.query.pages;
+  if (!pages) return [];
+  return Object.values(pages)
+    .map(p => p.title)
+    .filter(t => t && !/^(Appendice|Categoria|Wikizionario|Modulo|Template|MediaWiki|Aiuto|Wikisaurus):/i.test(t));
+}
+
 function extractItalianDefinitions(wikitext) {
   const secMatch = wikitext.match(/\{\{-it-\}\}[\s\S]*?(?=\n==[^=]|\n\{\{-\w\w-\}\}|$)/);
   if (!secMatch) return [];
   const section = secMatch[0];
-
-  const posBlocks = [...section.matchAll(/===\s*([^=]+?)\s*===([\s\S]*?)(?=\n===[^=]|\n==[^=]|$)/g)];
+  const lines = section.split('\n');
   const defs = [];
-
-  const scanLines = (text) => {
-    const lines = text.split('\n');
-    for (const line of lines) {
-      const m = line.match(/^#{1,2}(?!\s*[:*])\s*(.+)/);
-      if (!m) continue;
-      const cleaned = stripWikitext(m[1]);
-      if (cleaned.length < 6 || cleaned.includes('{{') || cleaned.includes('[[')) continue;
-      if (INFLECTED_FORM_PATTERN.test(cleaned)) continue;
-      defs.push(cleaned);
-    }
-  };
-
-  if (posBlocks.length === 0) {
-    scanLines(section);
-  } else {
-    for (const [, header, body] of posBlocks) {
-      if (/voce\s+verbale|forma\s+di/i.test(header)) continue; // salta forme flesse (es. "Voce verbale")
-      scanLines(body);
-    }
+  for (const line of lines) {
+    const m = line.match(/^#{1,2}(?!\s*[:*])\s*(.+)/);
+    if (!m) continue;
+    const cleaned = stripWikitext(m[1]);
+    if (cleaned.length < 6) continue;
+    if (INFLECTED_FORM_PATTERN.test(cleaned)) continue;
+    defs.push(cleaned);
   }
   return defs;
 }
 
-async function findRandomDefinition(maxAttempts) {
-  for (let i = 0; i < maxAttempts; i++) {
-    setStatus(`ricerca in corso… (tentativo ${i + 1})`);
-    const title = await fetchRandomTitle();
-    if (!title || /^(Appendice|Categoria|Wikizionario|Modulo|Template|MediaWiki):/i.test(title)) continue;
-    const wikitext = await fetchWikitext(title);
-    if (!wikitext) continue;
-    const defs = extractItalianDefinitions(wikitext);
-    if (defs.length === 0) continue;
-    const def = defs[Math.floor(Math.random() * defs.length)];
-    return { lemma: title, definizione: def };
+async function findRandomDefinition(maxRounds) {
+  const BATCH = 10;
+  for (let round = 0; round < maxRounds; round++) {
+    setStatus(`ricerca in corso… (gruppo ${round + 1} di ${maxRounds})`);
+    const titles = await fetchRandomTitles(BATCH);
+    if (titles.length === 0) continue;
+    const results = await Promise.all(titles.map(async (title) => {
+      try {
+        const wikitext = await fetchWikitext(title);
+        if (!wikitext) return null;
+        const defs = extractItalianDefinitions(wikitext);
+        if (defs.length === 0) return null;
+        return { lemma: title, defs };
+      } catch (e) {
+        return null;
+      }
+    }));
+    const candidates = results.filter(Boolean);
+    if (candidates.length > 0) {
+      const pick = candidates[Math.floor(Math.random() * candidates.length)];
+      const def = pick.defs[Math.floor(Math.random() * pick.defs.length)];
+      return { lemma: pick.lemma, definizione: def };
+    }
   }
   return null;
 }
@@ -262,7 +261,7 @@ async function onGenerate() {
   generateBtn.disabled = true;
   randomWordBtn.disabled = true;
   try {
-    const result = await findRandomDefinition(15);
+    const result = await findRandomDefinition(6);
     if (!result) {
       setStatus('nessuna definizione trovata dopo vari tentativi. riprova.', true);
       return;
@@ -285,9 +284,9 @@ async function onRandomWord() {
   setStatus('cerco una parola…');
   try {
     let title = null;
-    for (let i = 0; i < 6 && !title; i++) {
-      const t = await fetchRandomTitle();
-      if (t && /^[a-zàèéìòù'-]+$/i.test(t)) title = t;
+    for (let i = 0; i < 4 && !title; i++) {
+      const titles = await fetchRandomTitles(5);
+      title = titles.find(t => /^[a-zàèéìòù'-]+$/i.test(t));
     }
     if (title) definiendumInput.value = title;
     setStatus('');
