@@ -229,7 +229,12 @@ async function findRandomDefinition(maxRounds) {
   const BATCH = 10;
   for (let round = 0; round < maxRounds; round++) {
     setStatus(`ricerca in corso… (gruppo ${round + 1} di ${maxRounds})`);
-    const titles = await fetchRandomTitles(BATCH);
+    let titles = [];
+    try {
+      titles = await fetchRandomTitles(BATCH);
+    } catch (e) {
+      continue; // fallimento di rete su questo round: passa al successivo invece di interrompere tutto
+    }
     if (titles.length === 0) continue;
     const results = await Promise.all(titles.map(async (title) => {
       try {
@@ -261,7 +266,7 @@ async function onGenerate() {
   generateBtn.disabled = true;
   randomWordBtn.disabled = true;
   try {
-    const result = await findRandomDefinition(6);
+    const result = await findRandomDefinition(8);
     if (!result) {
       setStatus('nessuna definizione trovata dopo vari tentativi. riprova.', true);
       return;
