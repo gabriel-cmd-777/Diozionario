@@ -58,6 +58,8 @@
   button:disabled { opacity: 0.4; cursor: default; }
   button.primary { background: var(--stamp); border-color: var(--stamp); color: #f2e9e2; flex: 1; }
   button.primary:hover:not(:disabled) { background: #8f3535; }
+  .pos-row { flex-wrap: wrap; }
+  .pos-row .pos-btn { flex: 1 1 calc(50% - 4px); min-width: 120px; }
   button.ghost { background: transparent; }
 
   .status { font-size: 12px; color: var(--text-dim); min-height: 16px; margin: -4px 0 0; }
@@ -129,7 +131,12 @@
       <input type="text" id="definiendum" placeholder="definiendum (es. esistere)" autocomplete="off">
       <button id="randomWordBtn" title="Definiendum casuale">Casuale</button>
     </div>
-    <button class="primary" id="generateBtn">Genera innesto</button>
+    <div class="row pos-row">
+      <button class="primary pos-btn" data-pos="">Casuale</button>
+      <button class="primary pos-btn" data-pos="sostantivo">Sostantivi</button>
+      <button class="primary pos-btn" data-pos="verbo">Verbi</button>
+      <button class="primary pos-btn" data-pos="aggettivo">Aggettivi</button>
+    </div>
     <p class="status" id="status"></p>
   </div>
 
@@ -158,7 +165,7 @@ let current = null;
 
 const statusEl = document.getElementById('status');
 const cardEl = document.getElementById('card');
-const generateBtn = document.getElementById('generateBtn');
+const posButtons = document.querySelectorAll('.pos-btn');
 const randomWordBtn = document.getElementById('randomWordBtn');
 const definiendumInput = document.getElementById('definiendum');
 
@@ -197,6 +204,12 @@ function stripWikitext(s) {
 
 const INFLECTED_FORM_PATTERN = /^(prima|seconda|terza)\s+persona|participio\s+(passato|presente)|gerundio|plurale\s+(di|femminile)|femminile\s+(di|plurale|singolare)|maschile\s+(di|plurale|singolare)|singolare\s+(di|maschile|femminile)|forma\s+flessa|voce\s+(verbale\s+)?del\s+verbo|imperativo\s+(di|singolare|plurale)|congiuntivo\s+(di|presente|imperfetto)|condizionale\s+(di|presente)|indicativo\s+(di|presente|imperfetto|futuro)|comparativo\s+di|superlativo\s+di/i;
 
+const POS_PATTERNS = {
+  sostantivo: /\{\{-?sost-?\|it\}\}/i,
+  verbo: /\{\{-?verb-?\|it\}\}/i,
+  aggettivo: /\{\{-?agg-?\|it\}\}/i,
+};
+
 async function fetchRandomTitles(n) {
   const url = `${API}?action=query&generator=random&grnnamespace=0&grnlimit=${n}&format=json&origin=*`;
   const res = await fetch(url);
@@ -208,10 +221,11 @@ async function fetchRandomTitles(n) {
     .filter(t => t && !/^(Appendice|Categoria|Wikizionario|Modulo|Template|MediaWiki|Aiuto|Wikisaurus):/i.test(t));
 }
 
-function extractItalianDefinitions(wikitext) {
+function extractItalianDefinitions(wikitext, posFilter) {
   const secMatch = wikitext.match(/\{\{-it-\}\}[\s\S]*?(?=\n==[^=]|\n\{\{-\w\w-\}\}|$)/);
   if (!secMatch) return [];
   const section = secMatch[0];
+  if (posFilter && !POS_PATTERNS[posFilter].test(section)) return [];
   const lines = section.split('\n');
   const defs = [];
   for (const line of lines) {
@@ -225,7 +239,7 @@ function extractItalianDefinitions(wikitext) {
   return defs;
 }
 
-async function findRandomDefinition(maxRounds) {
+async function findRandomDefinition(maxRounds, posFilter) {
   const BATCH = 10;
   for (let round = 0; round < maxRounds; round++) {
     setStatus(`ricerca in corso… (gruppo ${round + 1} di ${maxRounds})`);
@@ -240,7 +254,7 @@ async function findRandomDefinition(maxRounds) {
       try {
         const wikitext = await fetchWikitext(title);
         if (!wikitext) return null;
-        const defs = extractItalianDefinitions(wikitext);
+        const defs = extractItalianDefinitions(wikitext, posFilter);
         if (defs.length === 0) return null;
         return { lemma: title, defs };
       } catch (e) {
@@ -257,16 +271,17 @@ async function findRandomDefinition(maxRounds) {
   return null;
 }
 
-async function onGenerate() {
+async function onGenerate(posFilter) {
   const definiendum = definiendumInput.value.trim();
   if (!definiendum) {
-    setStatus('scrivi prima un definiendum, o premi "Casuale".', true);
+    setStatus('scrivi prima un definiendum, o premi "Casuale" per il definiendum.', true);
     return;
   }
-  generateBtn.disabled = true;
+  posButtons.forEach(b => b.disabled = true);
   randomWordBtn.disabled = true;
   try {
-    const result = await findRandomDefinition(8);
+    const maxRounds = posFilter === 'verbo' ? 14 : 8; // i verbi all'infinito sono più rari: più round
+    const result = await findRandomDefinition(maxRounds, posFilter);
     if (!result) {
       setStatus('nessuna definizione trovata dopo vari tentativi. riprova.', true);
       return;
@@ -279,7 +294,7 @@ async function onGenerate() {
   } catch (e) {
     setStatus('errore di rete durante l\'accesso a Wikizionario.', true);
   } finally {
-    generateBtn.disabled = false;
+    posButtons.forEach(b => b.disabled = false);
     randomWordBtn.disabled = false;
   }
 }
@@ -367,9 +382,11 @@ document.getElementById('clearHistory').addEventListener('click', () => {
   }
 });
 
-generateBtn.addEventListener('click', onGenerate);
+posButtons.forEach(btn => {
+  btn.addEventListener('click', () => onGenerate(btn.dataset.pos || undefined));
+});
 randomWordBtn.addEventListener('click', onRandomWord);
-definiendumInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') onGenerate(); });
+definiendumInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') onGenerate(undefined); });
 
 renderHistory();
 </script>
