@@ -214,9 +214,9 @@ function extractItalianDefinitions(wikitext) {
 
   const posBlocks = [...section.matchAll(/===\s*([^=]+?)\s*===([\s\S]*?)(?=\n===[^=]|\n==[^=]|$)/g)];
   const defs = [];
-  for (const [, header, body] of posBlocks) {
-    if (/forma\s+di/i.test(header)) continue; // salta forme flesse (es. "Forma di verbo")
-    const lines = body.split('\n');
+
+  const scanLines = (text) => {
+    const lines = text.split('\n');
     for (const line of lines) {
       const m = line.match(/^#{1,2}(?!\s*[:*])\s*(.+)/);
       if (!m) continue;
@@ -224,6 +224,15 @@ function extractItalianDefinitions(wikitext) {
       if (cleaned.length < 6 || cleaned.includes('{{') || cleaned.includes('[[')) continue;
       if (INFLECTED_FORM_PATTERN.test(cleaned)) continue;
       defs.push(cleaned);
+    }
+  };
+
+  if (posBlocks.length === 0) {
+    scanLines(section);
+  } else {
+    for (const [, header, body] of posBlocks) {
+      if (/voce\s+verbale|forma\s+di/i.test(header)) continue; // salta forme flesse (es. "Voce verbale")
+      scanLines(body);
     }
   }
   return defs;
@@ -253,7 +262,7 @@ async function onGenerate() {
   generateBtn.disabled = true;
   randomWordBtn.disabled = true;
   try {
-    const result = await findRandomDefinition(10);
+    const result = await findRandomDefinition(15);
     if (!result) {
       setStatus('nessuna definizione trovata dopo vari tentativi. riprova.', true);
       return;
