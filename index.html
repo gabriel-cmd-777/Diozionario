@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Diozionario</title>
+<title>Definizioni innestate</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,500&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -205,17 +205,24 @@ function stripWikitext(s) {
   return t;
 }
 
+const INFLECTED_FORM_PATTERN = /^(prima|seconda|terza)\s+persona|participio\s+(passato|presente)|gerundio|plurale\s+(di|femminile)|femminile\s+(di|plurale|singolare)|maschile\s+(di|plurale|singolare)|singolare\s+(di|maschile|femminile)|forma\s+flessa|voce\s+(verbale\s+)?del\s+verbo|imperativo\s+(di|singolare|plurale)|congiuntivo\s+(di|presente|imperfetto)|condizionale\s+(di|presente)|indicativo\s+(di|presente|imperfetto|futuro)|comparativo\s+di|superlativo\s+di/i;
+
 function extractItalianDefinitions(wikitext) {
   const secMatch = wikitext.match(/\{\{-it-\}\}[\s\S]*?(?=\n==[^=]|\n\{\{-\w\w-\}\}|$)/);
   if (!secMatch) return [];
   const section = secMatch[0];
-  const lines = section.split('\n');
+
+  const posBlocks = [...section.matchAll(/===\s*([^=]+?)\s*===([\s\S]*?)(?=\n===[^=]|\n==[^=]|$)/g)];
   const defs = [];
-  for (const line of lines) {
-    const m = line.match(/^#{1,2}(?!\s*[:*])\s*(.+)/);
-    if (!m) continue;
-    const cleaned = stripWikitext(m[1]);
-    if (cleaned.length >= 6 && !cleaned.includes('{{') && !cleaned.includes('[[')) {
+  for (const [, header, body] of posBlocks) {
+    if (/forma\s+di/i.test(header)) continue; // salta forme flesse (es. "Forma di verbo")
+    const lines = body.split('\n');
+    for (const line of lines) {
+      const m = line.match(/^#{1,2}(?!\s*[:*])\s*(.+)/);
+      if (!m) continue;
+      const cleaned = stripWikitext(m[1]);
+      if (cleaned.length < 6 || cleaned.includes('{{') || cleaned.includes('[[')) continue;
+      if (INFLECTED_FORM_PATTERN.test(cleaned)) continue;
       defs.push(cleaned);
     }
   }
