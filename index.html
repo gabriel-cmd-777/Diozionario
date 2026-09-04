@@ -161,6 +161,18 @@
 <script>
 const API = 'https://it.wiktionary.org/w/api.php';
 const STORAGE_KEY = 'definizioni-innestate-storico';
+
+const CATEGORIES = {
+  sostantivo: 'Categoria:Sostantivi in italiano',
+  verbo: 'Categoria:Verbi in italiano',
+  aggettivo: 'Categoria:Aggettivi in italiano',
+};
+const POS_KEYS = Object.keys(CATEGORIES);
+
+// Serbatoio locale: definizioni già pronte, per non interrogare l'API a ogni clic.
+const pool = { sostantivo: [], verbo: [], aggettivo: [] };
+const refilling = { sostantivo: false, verbo: false, aggettivo: false };
+
 let current = null;
 
 const statusEl = document.getElementById('status');
@@ -174,17 +186,7 @@ function setStatus(msg, isError) {
   statusEl.classList.toggle('error', !!isError);
 }
 
-async function fetchWikitext(title) {
-  const url = `${API}?action=query&titles=${encodeURIComponent(title)}&prop=revisions&rvprop=content&rvslots=main&format=json&origin=*`;
-  const res = await fetch(url);
-  const data = await res.json();
-  const pages = data.query && data.query.pages;
-  if (!pages) return null;
-  const page = Object.values(pages)[0];
-  if (!page || !page.revisions) return null;
-  const slots = page.revisions[0].slots;
-  return slots && slots.main ? slots.main['*'] : null;
-}
+const INFLECTED_FORM_PATTERN = /^(prima|seconda|terza)\s+persona|participio\s+(passato|presente)|gerundio|plurale\s+(di|femminile)|femminile\s+(di|plurale|singolare)|maschile\s+(di|plurale|singolare)|singolare\s+(di|maschile|femminile)|forma\s+flessa|voce\s+(verbale\s+)?del\s+verbo|imperativo\s+(di|singolare|plurale)|congiuntivo\s+(di|presente|imperfetto)|condizionale\s+(di|presente)|indicativo\s+(di|presente|imperfetto|futuro)|comparativo\s+di|superlativo\s+di/i;
 
 function stripWikitext(s) {
   let t = s;
@@ -202,33 +204,11 @@ function stripWikitext(s) {
   return t;
 }
 
-const INFLECTED_FORM_PATTERN = /^(prima|seconda|terza)\s+persona|participio\s+(passato|presente)|gerundio|plurale\s+(di|femminile)|femminile\s+(di|plurale|singolare)|maschile\s+(di|plurale|singolare)|singolare\s+(di|maschile|femminile)|forma\s+flessa|voce\s+(verbale\s+)?del\s+verbo|imperativo\s+(di|singolare|plurale)|congiuntivo\s+(di|presente|imperfetto)|condizionale\s+(di|presente)|indicativo\s+(di|presente|imperfetto|futuro)|comparativo\s+di|superlativo\s+di/i;
-
-const POS_PATTERNS = {
-  sostantivo: /\{\{-?sost-?\|it\}\}/i,
-  verbo: /\{\{-?verb-?\|it\}\}/i,
-  aggettivo: /\{\{-?agg-?\|it\}\}/i,
-};
-
-async function fetchRandomTitles(n) {
-  const url = `${API}?action=query&generator=random&grnnamespace=0&grnlimit=${n}&format=json&origin=*`;
-  const res = await fetch(url);
-  const data = await res.json();
-  const pages = data.query && data.query.pages;
-  if (!pages) return [];
-  return Object.values(pages)
-    .map(p => p.title)
-    .filter(t => t && !/^(Appendice|Categoria|Wikizionario|Modulo|Template|MediaWiki|Aiuto|Wikisaurus):/i.test(t));
-}
-
-function extractItalianDefinitions(wikitext, posFilter) {
+function extractItalianDefinitions(wikitext) {
   const secMatch = wikitext.match(/\{\{-it-\}\}[\s\S]*?(?=\n==[^=]|\n\{\{-\w\w-\}\}|$)/);
-  if (!secMatch) return [];
-  const section = secMatch[0];
-  if (posFilter && !POS_PATTERNS[posFilter].test(section)) return [];
-  const lines = section.split('\n');
+  const section = secMatch ? secMatch[0] : wikitext;
   const defs = [];
-  for (const line of lines) {
+  for (const line of section.split('\n')) {
     const m = line.match(/^#{1,2}(?!\s*[:*])\s*(.+)/);
     if (!m) continue;
     const cleaned = stripWikitext(m[1]);
@@ -239,51 +219,107 @@ function extractItalianDefinitions(wikitext, posFilter) {
   return defs;
 }
 
-async function findRandomDefinition(maxRounds, posFilter) {
-  const BATCH = 10;
-  for (let round = 0; round < maxRounds; round++) {
-    setStatus(`ricerca in corso… (gruppo ${round + 1} di ${maxRounds})`);
-    let titles = [];
-    try {
-      titles = await fetchRandomTitles(BATCH);
-    } catch (e) {
-      continue; // fallimento di rete su questo round: passa al successivo invece di interrompere tutto
-    }
-    if (titles.length === 0) continue;
-    const results = await Promise.all(titles.map(async (title) => {
-      try {
-        const wikitext = await fetchWikitext(title);
-        if (!wikitext) return null;
-        const defs = extractItalianDefinitions(wikitext, posFilter);
-        if (defs.length === 0) return null;
-        return { lemma: title, defs };
-      } catch (e) {
-        return null;
-      }
-    }));
-    const candidates = results.filter(Boolean);
-    if (candidates.length > 0) {
-      const pick = candidates[Math.floor(Math.random() * candidates.length)];
-      const def = pick.defs[Math.floor(Math.random() * pick.defs.length)];
-      return { lemma: pick.lemma, definizione: def };
-    }
+const LETTERS = 'abcdefgilmnoprstuv';
+function randomSortkeyPrefix() {
+  const a = LETTERS[Math.floor(Math.random() * LETTERS.length)];
+  const b = LETTERS[Math.floor(Math.random() * LETTERS.length)];
+  return a + b;
+}
+
+// Prende un blocco di lemmi veri dalla categoria richiesta, partendo da un punto casuale dell'alfabeto.
+async function fetchCategoryTitles(pos) {
+  const cat = CATEGORIES[pos];
+  const base = `${API}?action=query&list=categorymembers` +
+    `&cmtitle=${encodeURIComponent(cat)}` +
+    `&cmnamespace=0&cmlimit=60&cmtype=page&format=json&origin=*`;
+
+  const attempts = [
+    `${base}&cmstartsortkeyprefix=${randomSortkeyPrefix()}`,
+    `${base}&cmstartsortkeyprefix=${randomSortkeyPrefix().toUpperCase()}`,
+    base, // ultimo ripiego: dall'inizio della categoria
+  ];
+
+  for (const url of attempts) {
+    const res = await fetch(url);
+    const data = await res.json();
+    const members = data.query && data.query.categorymembers;
+    if (!members || members.length === 0) continue;
+    const titles = members.map(m => m.title).filter(t => /^[a-zàèéìòùA-Z'-]+$/.test(t));
+    if (titles.length > 0) return titles;
   }
-  return null;
+  return [];
+}
+
+// Scarica in UNA sola richiesta il testo di molte voci insieme.
+async function fetchManyWikitexts(titles) {
+  if (titles.length === 0) return [];
+  const url = `${API}?action=query&titles=${encodeURIComponent(titles.join('|'))}` +
+    `&prop=revisions&rvprop=content&rvslots=main&format=json&origin=*`;
+  const res = await fetch(url);
+  const data = await res.json();
+  const pages = data.query && data.query.pages;
+  if (!pages) return [];
+  const out = [];
+  for (const page of Object.values(pages)) {
+    if (!page.revisions) continue;
+    const slots = page.revisions[0].slots;
+    const text = slots && slots.main ? slots.main['*'] : null;
+    if (text) out.push({ title: page.title, wikitext: text });
+  }
+  return out;
+}
+
+// Riempie il serbatoio di una categoria. Due sole chiamate di rete per ~30 definizioni.
+async function refillPool(pos) {
+  if (refilling[pos]) return;
+  refilling[pos] = true;
+  try {
+    const titles = await fetchCategoryTitles(pos);
+    const subset = titles.sort(() => Math.random() - 0.5).slice(0, 40);
+    const pages = await fetchManyWikitexts(subset);
+    for (const { title, wikitext } of pages) {
+      const defs = extractItalianDefinitions(wikitext);
+      if (defs.length === 0) continue;
+      const def = defs[Math.floor(Math.random() * defs.length)];
+      pool[pos].push({ lemma: title, definizione: def });
+    }
+    pool[pos].sort(() => Math.random() - 0.5);
+  } catch (e) {
+    // silenzioso: il serbatoio resterà vuoto e verrà ritentato al prossimo clic
+  } finally {
+    refilling[pos] = false;
+  }
+}
+
+async function takeFromPool(pos) {
+  if (pool[pos].length === 0) {
+    setStatus('preparo le definizioni…');
+    await refillPool(pos);
+  }
+  const item = pool[pos].pop() || null;
+  // Se il serbatoio si sta svuotando, lo ricarico in sottofondo senza far attendere l'utente.
+  if (pool[pos].length < 5 && !refilling[pos]) refillPool(pos);
+  return item;
 }
 
 async function onGenerate(posFilter) {
   const definiendum = definiendumInput.value.trim();
   if (!definiendum) {
-    setStatus('scrivi prima un definiendum, o premi "Casuale" per il definiendum.', true);
+    setStatus('scrivi prima un definiendum, o premi "Casuale" accanto al campo.', true);
     return;
   }
   posButtons.forEach(b => b.disabled = true);
   randomWordBtn.disabled = true;
   try {
-    const maxRounds = posFilter === 'verbo' ? 14 : 8; // i verbi all'infinito sono più rari: più round
-    const result = await findRandomDefinition(maxRounds, posFilter);
+    const pos = posFilter || POS_KEYS[Math.floor(Math.random() * POS_KEYS.length)];
+    let result = await takeFromPool(pos);
     if (!result) {
-      setStatus('nessuna definizione trovata dopo vari tentativi. riprova.', true);
+      // secondo tentativo, con un punto di partenza diverso nell'alfabeto
+      await refillPool(pos);
+      result = pool[pos].pop() || null;
+    }
+    if (!result) {
+      setStatus('nessuna definizione trovata. riprova tra qualche secondo.', true);
       return;
     }
     setStatus('');
@@ -303,13 +339,14 @@ async function onRandomWord() {
   randomWordBtn.disabled = true;
   setStatus('cerco una parola…');
   try {
-    let title = null;
-    for (let i = 0; i < 4 && !title; i++) {
-      const titles = await fetchRandomTitles(5);
-      title = titles.find(t => /^[a-zàèéìòù'-]+$/i.test(t));
+    const pos = POS_KEYS[Math.floor(Math.random() * POS_KEYS.length)];
+    const titles = await fetchCategoryTitles(pos);
+    if (titles.length > 0) {
+      definiendumInput.value = titles[Math.floor(Math.random() * titles.length)];
+      setStatus('');
+    } else {
+      setStatus('non sono riuscito a pescare una parola. riprova.', true);
     }
-    if (title) definiendumInput.value = title;
-    setStatus('');
   } catch (e) {
     setStatus('errore nel recupero della parola casuale.', true);
   } finally {
@@ -365,7 +402,14 @@ function renderHistory() {
     div.className = 'hist-item';
     const date = new Date(entry.data);
     const dateStr = date.toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit', year: '2-digit' });
-    div.innerHTML = `<span class="hist-text">${entry.definiendum}: ${entry.definizione}</span><span class="hist-date">${dateStr}</span>`;
+    const text = document.createElement('span');
+    text.className = 'hist-text';
+    text.textContent = `${entry.definiendum}: ${entry.definizione}`;
+    const when = document.createElement('span');
+    when.className = 'hist-date';
+    when.textContent = dateStr;
+    div.appendChild(text);
+    div.appendChild(when);
     div.addEventListener('click', () => {
       current = entry;
       renderCard(entry);
@@ -389,6 +433,8 @@ randomWordBtn.addEventListener('click', onRandomWord);
 definiendumInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') onGenerate(undefined); });
 
 renderHistory();
+// Precarico un serbatoio all'avvio, così il primo clic è già istantaneo.
+refillPool(POS_KEYS[Math.floor(Math.random() * POS_KEYS.length)]);
 </script>
 </body>
 </html>
